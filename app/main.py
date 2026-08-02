@@ -11,14 +11,13 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message
 
-from app.cards import make_result_card
 from app.config import get_settings
 from app.content import RELATIONS, TRAITS
 from app.database import init_db
 from app.keyboards import MAIN_MENU, mirror_keyboard, receipt_keyboard, relation_keyboard, score_keyboard, share_keyboard
-from app.presentation import demo_report_text, demo_stats, preview_text
+from app.presentation import demo_report_text, preview_text
 from app.services import admin_stats, create_mirror, create_payment, generate_report, get_mirror, get_mirror_by_token, get_stats, has_responded, list_user_mirrors, review_payment, save_answers, store_report, upsert_user
 from app.states import FriendSurvey, PaymentFlow, SelfSurvey
 from app.web import make_web_app
@@ -59,17 +58,10 @@ async def ensure_user(message: Message):
 
 
 async def send_demo_report(message: Message) -> None:
-    try:
-        card = make_result_card("سارا (نمونه)", demo_stats())
-        await message.answer_photo(
-            BufferedInputFile(card, filename="ayeneh-sample.png"),
-            caption=(
-                "🖼 <b>نمونه کارت تصویری آینه</b>\n"
-                "این کارت همراه گزارش کامل ساخته می‌شه و آماده اشتراک‌گذاریه."
-            ),
-        )
-    except Exception:
-        logger.exception("Could not create demo result card")
+    await message.answer(
+        "🎁 <b>این یک نمونه فرضی از گزارش کامله</b>\n"
+        "تا قبل از پرداخت دقیقاً ببینی چه نوع تحلیلی دریافت می‌کنی 👇"
+    )
     await message.answer(demo_report_text(), reply_markup=MAIN_MENU)
 
 
@@ -376,8 +368,7 @@ async def pay(callback: CallbackQuery, state: FSMContext) -> None:
         "✨ سه ویژگی پررنگت با توضیح\n"
         "👀 بزرگ‌ترین تفاوت نگاه خودت و بقیه\n"
         "📊 مقایسه کامل هر ۸ ویژگی\n"
-        "💡 یک پیشنهاد کاربردی متناسب با نتیجه تو\n"
-        "🖼 کارت تصویری آماده استوری\n\n"
+        "💡 یک پیشنهاد کاربردی متناسب با نتیجه تو\n\n"
         f"💳 مبلغ: <b>{settings.price_label} تومان</b>\n\n"
         f"<code>{settings.card_display}</code>\n"
         f"به نام <b>{settings.card_holder}</b>\n\n"
@@ -510,19 +501,7 @@ async def report(callback: CallbackQuery) -> None:
     if not report_text:
         report_text = await generate_report(settings, mirror.owner.first_name, stats)
         await store_report(mirror.id, report_text)
-    await callback.message.answer(report_text)
-
-    try:
-        card = make_result_card(mirror.owner.first_name, stats)
-        await callback.message.answer_photo(
-            BufferedInputFile(card, filename=f"ayeneh-{mirror.id}.png"),
-            caption=(
-                "🖼 <b>کارت تصویری آینه تو</b>\n"
-                "می‌تونی ذخیره‌اش کنی و برای استوری یا دوستات بفرستی 🪞"
-            ),
-        )
-    except Exception:
-        logger.exception("Could not create result card for mirror %s", mirror.id)
+    await callback.message.answer(report_text, reply_markup=MAIN_MENU)
 
 
 @router.message(Command("admin"))
