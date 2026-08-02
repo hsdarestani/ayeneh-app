@@ -30,7 +30,11 @@ async def upsert_user(telegram_id: int, first_name: str, username: str | None) -
     async with SessionLocal() as session:
         user = await session.scalar(select(User).where(User.telegram_id == telegram_id))
         if user is None:
-            user = User(telegram_id=telegram_id, first_name=_clean_name(first_name), username=_clean_name(username) or None)
+            user = User(
+                telegram_id=telegram_id,
+                first_name=_clean_name(first_name),
+                username=_clean_name(username) or None,
+            )
             session.add(user)
         else:
             user.first_name = _clean_name(first_name)
@@ -41,7 +45,23 @@ async def upsert_user(telegram_id: int, first_name: str, username: str | None) -
 
 
 async def create_mirror(user_id: int) -> Mirror:
+    """Return the user's current unfinished mirror or create a new one.
+
+    Repeated taps on «ساخت آینه من» must not create empty duplicate mirrors.
+    """
     async with SessionLocal() as session:
+        unfinished = await session.scalar(
+            select(Mirror)
+            .where(
+                Mirror.owner_id == user_id,
+                Mirror.self_completed.is_(False),
+            )
+            .order_by(Mirror.created_at.desc())
+            .limit(1)
+        )
+        if unfinished is not None:
+            return unfinished
+
         mirror = Mirror(owner_id=user_id, token=secrets.token_urlsafe(12))
         session.add(mirror)
         await session.commit()
@@ -51,24 +71,66 @@ async def create_mirror(user_id: int) -> Mirror:
 
 async def get_mirror(mirror_id: int) -> Mirror | None:
     async with SessionLocal() as session:
-        return await session.scalar(select(Mirror).options(selectinload(Mirror.owner)).where(Mirror.id == mirror_id))
+        return await session.scalar(
+            select(Mirror)
+            .options(selectinload(Mirror.owner))
+            .where(Mirror.id == mirror_id)
+        )
 
 
 async def get_mirror_by_token(token: str) -> Mirror | None:
     async with SessionLocal() as session:
-        return await session.scalar(select(Mirror).options(selectinload(Mirror.owner)).where(Mirror.token == token))
+        return await session.scalar(
+            select(Mirror)
+            .options(selectinload(Mirror.owner))
+            .where(Mirror.token == token)
+        )
 
 
 async def list_user_mirrors(owner_id: int) -> list[Mirror]:
+    """Only show mirrors whose self survey was actually completed."""
     async with SessionLocal() as session:
-        result = await session.scalars(select(Mirror).where(Mirror.owner_id == owner_id).order_by(Mirror.created_at.desc()).limit(10))
+        result = await session.scalars(
+            select(Mirror)
+            .where(
+                Mirror.owner_id == owner_id,
+                Mirror.self_completed.is_(True),
+            )
+            .order_by(Mirror.created_at.desc())
+            .limit(10)
+        )
         return list(result)
 
 
-async def save_answers(mirror_id: int, respondent_telegram_id: int, scores: dict[str, int], *, is_self: bool, relation: str | None = None) -> None:
+async def save_answers(
+    mirror_id: int,
+    respondent_telegram_id: int,
+    scores: dict[str, int],
+    *,
+    is_self: bool,
+    relation: str | None = None,
+) -> None:
     async with SessionLocal() as session:
-        await session.execute(delete(Answer).where(Answer.mirror_id == mirror_id, Answer.respondent_telegram_id == respondent_telegram_id))
-        session.add_all([Answer(mirror_id=mirror_id, respondent_telegram_id=respondent_telegram_id, is_self=is_self, relation=relation, trait_key=key, score=max(1, min(5, int(value)))) for key, value in scores.items() if key in TRAIT_BY_KEY])
+        await session.execute(
+            delete(Answer).where(
+                Answer.mirror_id == mirror_id,
+                Answer.respondent_telegram_id == respondent_telegram_id,
+            )
+        )
+        session.add_all(
+            [
+                Answer(
+                    mirror_id=mirror_id,
+                    respondent_telegram_id=respondent_telegram_id,
+                    is_self=is_self,
+                    relation=relation,
+                    trait_key=key,
+                    score=max(1, min(5, int(value))),
+                )
+                for key, value in scores.items()
+                if key in TRAIT_BY_KEY
+            ]
+        )
         if is_self:
             mirror = await session.get(Mirror, mirror_id)
             if mirror:
@@ -78,13 +140,29 @@ async def save_answers(mirror_id: int, respondent_telegram_id: int, scores: dict
 
 async def has_responded(mirror_id: int, telegram_id: int) -> bool:
     async with SessionLocal() as session:
-        count = await session.scalar(select(func.count(Answer.id)).where(Answer.mirror_id == mirror_id, Answer.respondent_telegram_id == telegram_id, Answer.is_self.is_(False)))
+        count = await session.scalar(
+            select(func.count(Answer.id)).where(
+                Answer.mirror_id == mirror_id,
+                Answer.respondent_telegram_id == telegram_id,
+                Answer.is_self.is_(False),
+            )
+        )
         return bool(count)
 
 
 async def get_stats(mirror_id: int) -> MirrorStats:
     async with SessionLocal() as session:
-        rows = (await session.execute(select(Answer.trait_key, Answer.score, Answer.is_self, Answer.respondent_telegram_id).where(Answer.mirror_id == mirror_id))).all()
+        rows = (
+            await session.execute(
+                select(
+                    Answer.trait_key,
+                    Answer.score,
+                    Answer.is_self,
+                    Answer.respondent_telegram_id,
+                ).where(Answer.mirror_id == mirror_id)
+            )
+        ).all()
+
     self_scores: dict[str, list[int]] = defaultdict(list)
     other_scores: dict[str, list[int]] = defaultdict(list)
     respondents: set[int] = set()
@@ -94,20 +172,39 @@ async def get_stats(mirror_id: int) -> MirrorStats:
         else:
             other_scores[trait_key].append(score)
             respondents.add(respondent_id)
+
     average = lambda values: round(sum(values) / len(values), 2) if values else 0.0
-    return MirrorStats(len(respondents), {key: average(values) for key, values in self_scores.items()}, {key: average(values) for key, values in other_scores.items()})
+    return MirrorStats(
+        len(respondents),
+        {key: average(values) for key, values in self_scores.items()},
+        {key: average(values) for key, values in other_scores.items()},
+    )
 
 
-async def create_payment(mirror_id: int, payer_telegram_id: int, receipt_file_id: str, receipt_kind: str) -> Payment:
+async def create_payment(
+    mirror_id: int,
+    payer_telegram_id: int,
+    receipt_file_id: str,
+    receipt_kind: str,
+) -> Payment:
     async with SessionLocal() as session:
-        payment = Payment(mirror_id=mirror_id, payer_telegram_id=payer_telegram_id, receipt_file_id=receipt_file_id, receipt_kind=receipt_kind)
+        payment = Payment(
+            mirror_id=mirror_id,
+            payer_telegram_id=payer_telegram_id,
+            receipt_file_id=receipt_file_id,
+            receipt_kind=receipt_kind,
+        )
         session.add(payment)
         await session.commit()
         await session.refresh(payment)
         return payment
 
 
-async def review_payment(payment_id: int, admin_id: int, approve: bool) -> tuple[Payment | None, Mirror | None]:
+async def review_payment(
+    payment_id: int,
+    admin_id: int,
+    approve: bool,
+) -> tuple[Payment | None, Mirror | None]:
     async with SessionLocal() as session:
         payment = await session.get(Payment, payment_id)
         if payment is None or payment.status != "pending":
@@ -132,28 +229,52 @@ async def store_report(mirror_id: int, report: str) -> None:
 def preview_text(stats: MirrorStats) -> str:
     if not stats.others_scores:
         return "هنوز پاسخی ثبت نشده."
-    ranked = sorted(stats.others_scores.items(), key=lambda item: item[1], reverse=True)
+    ranked = sorted(
+        stats.others_scores.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )
     top_key, top_score = ranked[0]
     gaps = []
     for key, others_score in stats.others_scores.items():
         if key in stats.self_scores:
-            gaps.append((abs(others_score - stats.self_scores[key]), key, others_score - stats.self_scores[key]))
+            gaps.append(
+                (
+                    abs(others_score - stats.self_scores[key]),
+                    key,
+                    others_score - stats.self_scores[key],
+                )
+            )
     gap_line = ""
     if gaps:
         _, gap_key, delta = max(gaps)
         direction = "بیشتر" if delta > 0 else "کمتر"
-        gap_line = f"\n\nبزرگ‌ترین تفاوت: دیگران «{TRAIT_BY_KEY[gap_key].title}» تو را {direction} از چیزی می‌بینند که خودت فکر می‌کنی."
-    return f"👀 <b>یک تکه از آینه‌ات</b>\n\nپررنگ‌ترین ویژگی تو از نگاه دیگران: <b>{TRAIT_BY_KEY[top_key].title}</b> ({round(top_score * 20)}٪){gap_line}\n\nگزارش کامل، تفاوت نگاه خودت و بقیه را برای همه ویژگی‌ها نشان می‌دهد."
+        gap_line = (
+            f"\n\nبزرگ‌ترین تفاوت: دیگران «{TRAIT_BY_KEY[gap_key].title}» "
+            f"تو را {direction} از چیزی می‌بینند که خودت فکر می‌کنی."
+        )
+    return (
+        "👀 <b>یک تکه از آینه‌ات</b>\n\n"
+        f"پررنگ‌ترین ویژگی تو از نگاه دیگران: "
+        f"<b>{TRAIT_BY_KEY[top_key].title}</b> ({round(top_score * 20)}٪)"
+        f"{gap_line}\n\n"
+        "گزارش کامل، تفاوت نگاه خودت و بقیه را برای همه ویژگی‌ها نشان می‌دهد."
+    )
 
 
 def fallback_report(owner_name: str, stats: MirrorStats) -> str:
     lines = [f"🪞 <b>گزارش کامل آینه {owner_name}</b>", ""]
-    ranked = sorted(stats.others_scores.items(), key=lambda item: item[1], reverse=True)
+    ranked = sorted(
+        stats.others_scores.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )
     if ranked:
         lines.append("<b>ویژگی‌هایی که بیشتر از همه دیده شده‌اند</b>")
         for key, score in ranked[:3]:
             lines.append(f"• {TRAIT_BY_KEY[key].title}: {round(score * 20)}٪")
         lines.append("")
+
     gaps = []
     for trait in TRAITS:
         own = stats.self_scores.get(trait.key)
@@ -162,21 +283,54 @@ def fallback_report(owner_name: str, stats: MirrorStats) -> str:
             gaps.append((abs(others - own), trait, own, others))
     if gaps:
         _, trait, own, others = max(gaps)
-        insight = "اطرافیانت این ویژگی را در تو پررنگ‌تر از چیزی می‌بینند که خودت حس می‌کنی." if others > own else "خودت این ویژگی را پررنگ‌تر از چیزی می‌بینی که دیگران تجربه می‌کنند."
-        lines.extend(["<b>نقطه کور احتمالی</b>", f"در «{trait.title}»، نگاه تو {round(own * 20)}٪ و نگاه دیگران {round(others * 20)}٪ است. {insight}", ""])
+        insight = (
+            "اطرافیانت این ویژگی را در تو پررنگ‌تر از چیزی می‌بینند که خودت حس می‌کنی."
+            if others > own
+            else "خودت این ویژگی را پررنگ‌تر از چیزی می‌بینی که دیگران تجربه می‌کنند."
+        )
+        lines.extend(
+            [
+                "<b>نقطه کور احتمالی</b>",
+                f"در «{trait.title}»، نگاه تو {round(own * 20)}٪ و نگاه دیگران "
+                f"{round(others * 20)}٪ است. {insight}",
+                "",
+            ]
+        )
+
     lines.append("<b>جدول نگاه تو و دیگران</b>")
     for trait in TRAITS:
         own = round(stats.self_scores.get(trait.key, 0) * 20)
         others = round(stats.others_scores.get(trait.key, 0) * 20)
         lines.append(f"• {trait.title}: تو {own}٪ | دیگران {others}٪")
-    lines.extend(["", "این نتیجه تشخیص روان‌شناختی نیست؛ یک تصویر جمعی از تجربه آدم‌های اطراف توست."])
+    lines.extend(
+        [
+            "",
+            "این نتیجه تشخیص روان‌شناختی نیست؛ یک تصویر جمعی از تجربه آدم‌های اطراف توست.",
+        ]
+    )
     return "\n".join(lines)
 
 
-async def generate_report(settings: Settings, owner_name: str, stats: MirrorStats) -> str:
+async def generate_report(
+    settings: Settings,
+    owner_name: str,
+    stats: MirrorStats,
+) -> str:
     if not settings.openai_api_key:
         return fallback_report(owner_name, stats)
-    payload = {"owner_name": owner_name, "respondent_count": stats.respondent_count, "traits": [{"name": trait.title, "self_percent": round(stats.self_scores.get(trait.key, 0) * 20), "others_percent": round(stats.others_scores.get(trait.key, 0) * 20)} for trait in TRAITS]}
+
+    payload = {
+        "owner_name": owner_name,
+        "respondent_count": stats.respondent_count,
+        "traits": [
+            {
+                "name": trait.title,
+                "self_percent": round(stats.self_scores.get(trait.key, 0) * 20),
+                "others_percent": round(stats.others_scores.get(trait.key, 0) * 20),
+            }
+            for trait in TRAITS
+        ],
+    }
     prompt = f"""تو نویسنده گزارش محصول فارسی «آینه» هستی. از داده‌های زیر یک گزارش کوتاه، دقیق، گرم و بدون قضاوت بنویس.
 - گزارش باید فارسی باشد و حداکثر 500 کلمه.
 - از ادعاهای تشخیصی، پزشکی و قطعی خودداری کن.
@@ -187,7 +341,11 @@ async def generate_report(settings: Settings, owner_name: str, stats: MirrorStat
 {json.dumps(payload, ensure_ascii=False)}"""
     try:
         client = AsyncOpenAI(api_key=settings.openai_api_key)
-        response = await client.responses.create(model=settings.openai_model, input=prompt, store=False)
+        response = await client.responses.create(
+            model=settings.openai_model,
+            input=prompt,
+            store=False,
+        )
         text = (response.output_text or "").strip()
         return text or fallback_report(owner_name, stats)
     except Exception:
@@ -197,8 +355,36 @@ async def generate_report(settings: Settings, owner_name: str, stats: MirrorStat
 async def admin_stats() -> dict[str, int]:
     async with SessionLocal() as session:
         users = await session.scalar(select(func.count(User.id))) or 0
-        mirrors = await session.scalar(select(func.count(Mirror.id))) or 0
-        responses = await session.scalar(select(func.count(distinct(Answer.respondent_telegram_id))).where(Answer.is_self.is_(False))) or 0
-        pending = await session.scalar(select(func.count(Payment.id)).where(Payment.status == "pending")) or 0
-        paid = await session.scalar(select(func.count(Mirror.id)).where(Mirror.paid.is_(True))) or 0
-    return {"users": users, "mirrors": mirrors, "responses": responses, "pending": pending, "paid": paid}
+        mirrors = (
+            await session.scalar(
+                select(func.count(Mirror.id)).where(Mirror.self_completed.is_(True))
+            )
+            or 0
+        )
+        responses = (
+            await session.scalar(
+                select(func.count(distinct(Answer.respondent_telegram_id))).where(
+                    Answer.is_self.is_(False)
+                )
+            )
+            or 0
+        )
+        pending = (
+            await session.scalar(
+                select(func.count(Payment.id)).where(Payment.status == "pending")
+            )
+            or 0
+        )
+        paid = (
+            await session.scalar(
+                select(func.count(Mirror.id)).where(Mirror.paid.is_(True))
+            )
+            or 0
+        )
+    return {
+        "users": users,
+        "mirrors": mirrors,
+        "responses": responses,
+        "pending": pending,
+        "paid": paid,
+    }
