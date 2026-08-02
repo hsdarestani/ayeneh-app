@@ -1,0 +1,72 @@
+name: Deploy Ayeneh
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ayeneh-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          BOT_TOKEN: ${{ secrets.BOTTOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAIAPIKEY }}
+          ADMIN_TELEGRAM_IDS: ${{ secrets.ADMIN_TELEGRAM_IDS }}
+          CARD_NUMBER: ${{ secrets.CARD_NUMBER }}
+          CARD_HOLDER: ${{ secrets.CARD_HOLDER }}
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          envs: BOT_TOKEN,OPENAI_API_KEY,ADMIN_TELEGRAM_IDS,CARD_NUMBER,CARD_HOLDER
+          script_stop: true
+          script: |
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            if ! command -v docker >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y ca-certificates curl git
+              curl -fsSL https://get.docker.com | sh
+            fi
+            if ! docker compose version >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y docker-compose-plugin
+            fi
+            mkdir -p /opt/ayeneh-app
+            if [ ! -d /opt/ayeneh-app/.git ]; then
+              git clone https://github.com/hsdarestani/ayeneh-app.git /opt/ayeneh-app
+            fi
+            cd /opt/ayeneh-app
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p data
+            chmod 700 data
+            umask 077
+            cat > .env <<ENVEOF
+            BOT_TOKEN=${BOT_TOKEN}
+            OPENAI_API_KEY=${OPENAI_API_KEY}
+            OPENAI_MODEL=gpt-5-mini
+            ADMIN_TELEGRAM_IDS=${ADMIN_TELEGRAM_IDS}
+            CARD_NUMBER=${CARD_NUMBER}
+            CARD_HOLDER=${CARD_HOLDER}
+            PRICE_TOMAN=99000
+            DOMAIN=ayeneh.smarbiz.sbs
+            DATABASE_URL=sqlite+aiosqlite:////app/data/ayeneh.db
+            MIN_RESPONSES_FOR_PREVIEW=3
+            ENVEOF
+            chmod 600 .env
+            docker compose up -d --build --remove-orphans
+            docker image prune -f
+            sleep 8
+            docker compose ps
+            docker compose exec -T app curl -fsS http://127.0.0.1:8000/health || docker compose logs --tail=150 app

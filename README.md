@@ -6,36 +6,44 @@
 
 ## امکانات MVP
 
+- ربات عادی تلگرام با Long Polling؛ بدون Mini App
 - ساخت آینه با ۸ سؤال کوتاه
 - لینک دعوت ناشناس با Telegram Deep Link
 - جلوگیری از پاسخ تکراری
 - پیش‌نمایش رایگان بعد از ۳ پاسخ
-- پرداخت کارت‌به‌کارت و آپلود رسید
+- پرداخت کارت‌به‌کارت و ارسال رسید
 - تأیید یا رد رسید توسط ادمین داخل ربات
 - گزارش کامل با OpenAI و گزارش جایگزین بدون API
 - کارت تصویری قابل‌اشتراک
 - پنل آماری ساده با دستور `/admin`
-- لندینگ و حریم خصوصی روی دامنه
+- لندینگ و صفحه حریم خصوصی روی دامنه
 
 ## Secrets لازم در GitHub Actions
 
-این مقادیر را در `Settings → Secrets and variables → Actions` قرار دهید:
+در `Settings → Secrets and variables → Actions`:
 
 - `HOST`: آی‌پی سرور
-- `PASS`: رمز root سرور
-- `BOT_TOKEN`: توکن BotFather
+- `PASS`: رمز کاربر root سرور
+- `BOTTOKEN`: توکن BotFather
+- `OPENAIAPIKEY`: کلید OpenAI؛ اختیاری ولی توصیه‌شده
 - `ADMIN_TELEGRAM_IDS`: شناسه عددی ادمین؛ برای چند ادمین با کاما جدا شود
-- `OPENAIAPIKEY`: کلید OpenAI، اختیاری ولی توصیه‌شده
 - `CARD_NUMBER`: شماره کارت دریافت وجه
 - `CARD_HOLDER`: نام صاحب کارت
 
-پس از تکمیل Secrets، اجرای workflow یا Push روی `main` پروژه را روی سرور Deploy می‌کند.
+شماره کارت، توکن و کلید API عمداً داخل ریپوی Public قرار نمی‌گیرند.
 
-## اجرای محلی
+برای پیدا کردن شناسه عددی تلگرام، بعد از اجرای ربات دستور `/id` را بفرستید و مقدار برگشتی را در `ADMIN_TELEGRAM_IDS` قرار دهید؛ سپس Workflow را دوباره اجرا کنید.
+
+## اجرا و دیپلوی
+
+Push روی `main`، Workflow دیپلوی را اجرا می‌کند. روی سرور Docker نصب، پروژه در `/opt/ayeneh-app` Clone و سرویس‌ها با Docker Compose اجرا می‌شوند.
+
+رکورد A دامنه `ayeneh.smarbiz.sbs` باید به IP موجود در `HOST` اشاره کند. پورت‌های 80 و 443 نیز باید باز باشند. Caddy گواهی HTTPS را خودکار دریافت می‌کند.
+
+اجرای محلی:
 
 ```bash
 cp .env.example .env
-# مقادیر .env را تکمیل کنید
 docker compose up --build
 ```
 
@@ -44,7 +52,3 @@ docker compose up --build
 ```bash
 curl http://localhost:8000/health
 ```
-
-## DNS
-
-رکورد A دامنه `ayeneh.smarbiz.sbs` باید به IP موجود در `HOST` اشاره کند. Caddy گواهی HTTPS را خودکار دریافت می‌کند؛ پورت‌های 80 و 443 باید باز باشند.
