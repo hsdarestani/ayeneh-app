@@ -26,9 +26,23 @@ def _clean_name(value: str | None) -> str:
     return (value or "").strip()[:128]
 
 
-async def upsert_user(telegram_id: int, first_name: str, username: str | None) -> User:
+def _safe_plain_text(value: str) -> str:
+    return value.replace("<", "‹").replace(">", "›").strip()
+
+
+def _percent(score: float | None) -> int:
+    return max(0, min(100, round((score or 0) * 20)))
+
+
+async def upsert_user(
+    telegram_id: int,
+    first_name: str,
+    username: str | None,
+) -> User:
     async with SessionLocal() as session:
-        user = await session.scalar(select(User).where(User.telegram_id == telegram_id))
+        user = await session.scalar(
+            select(User).where(User.telegram_id == telegram_id)
+        )
         if user is None:
             user = User(
                 telegram_id=telegram_id,
@@ -39,16 +53,14 @@ async def upsert_user(telegram_id: int, first_name: str, username: str | None) -
         else:
             user.first_name = _clean_name(first_name)
             user.username = _clean_name(username) or None
+
         await session.commit()
         await session.refresh(user)
         return user
 
 
 async def create_mirror(user_id: int) -> Mirror:
-    """Return the user's current unfinished mirror or create a new one.
-
-    Repeated taps on «ساخت آینه من» must not create empty duplicate mirrors.
-    """
+    """Return the user's current unfinished mirror or create a new one."""
     async with SessionLocal() as session:
         unfinished = await session.scalar(
             select(Mirror)
@@ -62,7 +74,10 @@ async def create_mirror(user_id: int) -> Mirror:
         if unfinished is not None:
             return unfinished
 
-        mirror = Mirror(owner_id=user_id, token=secrets.token_urlsafe(12))
+        mirror = Mirror(
+            owner_id=user_id,
+            token=secrets.token_urlsafe(12),
+        )
         session.add(mirror)
         await session.commit()
         await session.refresh(mirror)
@@ -71,11 +86,16 @@ async def create_mirror(user_id: int) -> Mirror:
 
 async def get_mirror(mirror_id: int) -> Mirror | None:
     async with SessionLocal() as session:
-        return await session.scalar(
+        mirror = await session.scalar(
             select(Mirror)
             .options(selectinload(Mirror.owner))
             .where(Mirror.id == mirror_id)
         )
+        if mirror is not None:
+            # Reports are regenerated when opened so they stay compatible with
+            # the latest wording and include newly received answers.
+            mirror.report_text = None
+        return mirror
 
 
 async def get_mirror_by_token(token: str) -> Mirror | None:
@@ -131,10 +151,12 @@ async def save_answers(
                 if key in TRAIT_BY_KEY
             ]
         )
+
         if is_self:
             mirror = await session.get(Mirror, mirror_id)
             if mirror:
                 mirror.self_completed = True
+
         await session.commit()
 
 
@@ -166,6 +188,7 @@ async def get_stats(mirror_id: int) -> MirrorStats:
     self_scores: dict[str, list[int]] = defaultdict(list)
     other_scores: dict[str, list[int]] = defaultdict(list)
     respondents: set[int] = set()
+
     for trait_key, score, is_self, respondent_id in rows:
         if is_self:
             self_scores[trait_key].append(score)
@@ -173,11 +196,19 @@ async def get_stats(mirror_id: int) -> MirrorStats:
             other_scores[trait_key].append(score)
             respondents.add(respondent_id)
 
-    average = lambda values: round(sum(values) / len(values), 2) if values else 0.0
+    def average(values: list[int]) -> float:
+        return round(sum(values) / len(values), 2) if values else 0.0
+
     return MirrorStats(
-        len(respondents),
-        {key: average(values) for key, values in self_scores.items()},
-        {key: average(values) for key, values in other_scores.items()},
+        respondent_count=len(respondents),
+        self_scores={
+            key: average(values)
+            for key, values in self_scores.items()
+        },
+        others_scores={
+            key: average(values)
+            for key, values in other_scores.items()
+        },
     )
 
 
@@ -209,11 +240,13 @@ async def review_payment(
         payment = await session.get(Payment, payment_id)
         if payment is None or payment.status != "pending":
             return payment, None
+
         payment.status = "approved" if approve else "rejected"
         payment.reviewed_by = admin_id
         mirror = await session.get(Mirror, payment.mirror_id)
         if mirror and approve:
             mirror.paid = True
+
         await session.commit()
         return payment, mirror
 
@@ -226,88 +259,272 @@ async def store_report(mirror_id: int, report: str) -> None:
             await session.commit()
 
 
-def preview_text(stats: MirrorStats) -> str:
-    if not stats.others_scores:
-        return "هنوز پاسخی ثبت نشده."
-    ranked = sorted(
-        stats.others_scores.items(),
-        key=lambda item: item[1],
-        reverse=True,
-    )
-    top_key, top_score = ranked[0]
-    gaps = []
-    for key, others_score in stats.others_scores.items():
-        if key in stats.self_scores:
-            gaps.append(
-                (
-                    abs(others_score - stats.self_scores[key]),
-                    key,
-                    others_score - stats.self_scores[key],
-                )
-            )
-    gap_line = ""
-    if gaps:
-        _, gap_key, delta = max(gaps)
-        direction = "بیشتر" if delta > 0 else "کمتر"
-        gap_line = (
-            f"\n\nبزرگ‌ترین تفاوت: دیگران «{TRAIT_BY_KEY[gap_key].title}» "
-            f"تو را {direction} از چیزی می‌بینند که خودت فکر می‌کنی."
+def _trait_explanation(key: str, percent: int) -> str:
+    level = "high" if percent >= 70 else "medium" if percent >= 45 else "low"
+
+    explanations = {
+        "warmth": {
+            "high": "بیشتر آدم‌ها کنار تو زودتر احساس راحتی و صمیمیت می‌کنند.",
+            "medium": "معمولاً دوستانه‌ای، اما برای صمیمی‌شدن کامل کمی زمان می‌خواهی.",
+            "low": "ممکن است در برخورد اول کمی محتاط یا رسمی به نظر برسی.",
+        },
+        "trust": {
+            "high": "بقیه حس می‌کنند می‌توانند روی حرف، همراهی و مسئولیت‌پذیری تو حساب کنند.",
+            "medium": "در بیشتر موقعیت‌ها قابل اتکایی، اما احتمالاً این حس برای همه یکسان نیست.",
+            "low": "ممکن است بعضی‌ها هنوز برای تکیه‌کردن کامل به تو به زمان یا تجربه بیشتری نیاز داشته باشند.",
+        },
+        "confidence": {
+            "high": "در رفتار و تصمیم‌هایت معمولاً مطمئن و مسلط دیده می‌شوی.",
+            "medium": "در بعضی موقعیت‌ها مطمئنی و در بعضی موقعیت‌ها تردیدت دیده می‌شود.",
+            "low": "ممکن است با وجود توانایی‌ات، گاهی مردد یا کم‌اطمینان به نظر برسی.",
+        },
+        "sociability": {
+            "high": "معمولاً در جمع حضور فعالی داری و ارتباط‌گرفتن با تو برای بقیه راحت است.",
+            "medium": "بسته به جمع و حال‌وهوایت، گاهی اجتماعی و گاهی خلوت‌دوست دیده می‌شوی.",
+            "low": "احتمالاً جمع‌های کوچک یا ارتباط‌های عمیق را به شلوغی و آشنایی‌های زیاد ترجیح می‌دهی.",
+        },
+        "empathy": {
+            "high": "آدم‌ها معمولاً حس می‌کنند حرف و احساسشان را جدی می‌گیری و خوب می‌فهمی.",
+            "medium": "در بیشتر مواقع همراه و فهمیده‌ای، هرچند همیشه احساساتت را نشان نمی‌دهی.",
+            "low": "ممکن است بیشتر راه‌حل بدهی تا اینکه اول احساس طرف مقابل را همراهی کنی.",
+        },
+        "independence": {
+            "high": "در تصمیم‌گیری و پیش‌بردن کارها متکی به خودت دیده می‌شوی.",
+            "medium": "هم استقلال داری و هم در بعضی تصمیم‌ها نظر و همراهی دیگران برایت مهم است.",
+            "low": "ممکن است برای تصمیم‌های مهم بیشتر به تأیید یا همراهی دیگران نیاز داشته باشی.",
+        },
+        "calm": {
+            "high": "در شرایط سخت معمولاً کنترل خودت را حفظ می‌کنی و به بقیه حس ثبات می‌دهی.",
+            "medium": "فشار رویت اثر می‌گذارد، اما اغلب می‌توانی دوباره خودت را جمع‌وجور کنی.",
+            "low": "احتمالاً نگرانی یا فشار در رفتارت زودتر دیده می‌شود.",
+        },
+        "mystery": {
+            "high": "آدم‌ها برای شناختن احساسات و لایه‌های شخصی تو به زمان بیشتری نیاز دارند.",
+            "medium": "بعضی بخش‌های شخصیتت زود دیده می‌شود و بعضی بخش‌ها را فقط نزدیک‌ها می‌شناسند.",
+            "low": "بقیه معمولاً زود می‌فهمند چه حسی داری و چه جور آدمی هستی.",
+        },
+    }
+    return explanations[key][level]
+
+
+def _recommendation_for_trait(
+    key: str,
+    own_percent: int,
+    others_percent: int,
+) -> str:
+    if key == "warmth":
+        return (
+            "در یک گفت‌وگوی مهم، همان صمیمیتی را که بقیه در تو می‌بینند آگاهانه حفظ کن؛ "
+            "شروع آرام و دوستانه احتمال شنیده‌شدن حرفت را بیشتر می‌کند."
         )
+    if key == "trust":
+        return (
+            "از یکی از نزدیکانت بپرس دقیقاً کدام رفتار تو بیشترین حس اعتماد را به او می‌دهد؛ "
+            "آن رفتار می‌تواند یکی از توانایی‌های اصلی تو باشد."
+        )
+    if key == "confidence":
+        return (
+            "دفعه بعد که برای حرف‌زدن یا قبول مسئولیت مردد شدی، قبل از عقب‌کشیدن "
+            "یک قدم کوچک بردار؛ نتیجه نشان می‌دهد ممکن است از بیرون آماده‌تر از حس درونی‌ات دیده شوی."
+        )
+    if key == "sociability":
+        return (
+            "در جمع بعدی فقط یک بار زودتر وارد گفتگو شو یا خودت یک سؤال بپرس؛ "
+            "این کار کمک می‌کند ببینی برداشت بقیه از اجتماعی‌بودنت چقدر درست است."
+        )
+    if key == "empathy":
+        return (
+            "وقتی کسی درد دل می‌کند، پیش از پیشنهاد راه‌حل یک جمله بگو که نشان دهد احساسش را فهمیده‌ای؛ "
+            "این کار توانایی همدلی تو را روشن‌تر می‌کند."
+        )
+    if key == "independence":
+        return (
+            "برای یک تصمیم عقب‌افتاده، معیارهای خودت را روی کاغذ بنویس و زمان مشخصی برای تصمیم نهایی بگذار؛ "
+            "این کار استقلالت را به نتیجه عملی تبدیل می‌کند."
+        )
+    if key == "calm":
+        return (
+            "در موقعیت پراسترس بعدی، قبل از پاسخ‌دادن چند ثانیه مکث کن و مسئله را به یک قدم بعدی کوچک تبدیل کن؛ "
+            "این کار آرامشی را که می‌خواهی نشان بدهی پایدارتر می‌کند."
+        )
+
+    relation = (
+        "بیشتر از چیزی که فکر می‌کنی"
+        if others_percent < own_percent
+        else "کمتر از چیزی که فکر می‌کنی"
+    )
     return (
-        "👀 <b>یک تکه از آینه‌ات</b>\n\n"
-        f"پررنگ‌ترین ویژگی تو از نگاه دیگران: "
-        f"<b>{TRAIT_BY_KEY[top_key].title}</b> ({round(top_score * 20)}٪)"
-        f"{gap_line}\n\n"
-        "گزارش کامل، تفاوت نگاه خودت و بقیه را برای همه ویژگی‌ها نشان می‌دهد."
+        f"به واکنش آدم‌های نزدیکت دقت کن؛ شاید آن‌ها تو را {relation} قابل شناخت می‌بینند. "
+        "یک احساس یا نظر کوچک را واضح‌تر بیان کن و واکنششان را ببین."
     )
 
 
 def fallback_report(owner_name: str, stats: MirrorStats) -> str:
-    lines = [f"🪞 <b>گزارش کامل آینه {owner_name}</b>", ""]
+    safe_name = _safe_plain_text(owner_name) or "تو"
     ranked = sorted(
         stats.others_scores.items(),
         key=lambda item: item[1],
         reverse=True,
     )
-    if ranked:
-        lines.append("<b>ویژگی‌هایی که بیشتر از همه دیده شده‌اند</b>")
-        for key, score in ranked[:3]:
-            lines.append(f"• {TRAIT_BY_KEY[key].title}: {round(score * 20)}٪")
-        lines.append("")
 
-    gaps = []
+    if not ranked:
+        return (
+            f"🪞 گزارش کامل آینه {safe_name}\n\n"
+            "هنوز پاسخ کافی برای ساخت گزارش وجود ندارد."
+        )
+
+    comparisons: list[tuple[float, str, float, float]] = []
     for trait in TRAITS:
         own = stats.self_scores.get(trait.key)
         others = stats.others_scores.get(trait.key)
-        if own and others:
-            gaps.append((abs(others - own), trait, own, others))
-    if gaps:
-        _, trait, own, others = max(gaps)
-        insight = (
-            "اطرافیانت این ویژگی را در تو پررنگ‌تر از چیزی می‌بینند که خودت حس می‌کنی."
-            if others > own
-            else "خودت این ویژگی را پررنگ‌تر از چیزی می‌بینی که دیگران تجربه می‌کنند."
-        )
+        if own is not None and others is not None:
+            comparisons.append(
+                (others - own, trait.key, own, others)
+            )
+
+    positive_gap = max(comparisons, default=(0, ranked[0][0], 0, ranked[0][1]))
+    negative_gap = min(comparisons, default=(0, ranked[0][0], 0, ranked[0][1]))
+    closest = min(
+        comparisons,
+        key=lambda item: abs(item[0]),
+        default=(0, ranked[0][0], 0, ranked[0][1]),
+    )
+
+    top_three = ranked[:3]
+    top_titles = "، ".join(
+        TRAIT_BY_KEY[key].title
+        for key, _ in top_three
+    )
+
+    lines = [
+        f"🪞 گزارش کامل آینه {safe_name}",
+        f"بر اساس {stats.respondent_count} پاسخ ناشناس",
+        "",
+        "🔎 جمع‌بندی اصلی",
+        (
+            f"از نگاه آدم‌های اطرافت، سه ویژگی‌ای که بیشتر از همه به چشم آمده "
+            f"{top_titles} است. این یعنی برداشت کلی بقیه از تو بیشتر روی همین "
+            "ویژگی‌ها شکل گرفته. مهم‌ترین بخش گزارش، فاصله بین نگاه خودت و نگاه "
+            "بقیه است؛ چون نشان می‌دهد کجا احتمالاً خودت را کمتر یا بیشتر از چیزی "
+            "که دیده می‌شوی ارزیابی کرده‌ای."
+        ),
+        "",
+        "✨ سه ویژگی اصلی تو از نگاه بقیه",
+    ]
+
+    medals = ("🥇", "🥈", "🥉")
+    for medal, (key, score) in zip(medals, top_three):
+        percent = _percent(score)
         lines.extend(
             [
-                "<b>نقطه کور احتمالی</b>",
-                f"در «{trait.title}»، نگاه تو {round(own * 20)}٪ و نگاه دیگران "
-                f"{round(others * 20)}٪ است. {insight}",
+                f"{medal} {TRAIT_BY_KEY[key].title} — {percent}٪",
+                _trait_explanation(key, percent),
                 "",
             ]
         )
 
-    lines.append("<b>جدول نگاه تو و دیگران</b>")
+    positive_delta, positive_key, positive_own, positive_others = positive_gap
+    if positive_delta > 0:
+        lines.extend(
+            [
+                "🌟 غافلگیری مثبت",
+                (
+                    f"در «{TRAIT_BY_KEY[positive_key].title}»، خودت {_percent(positive_own)}٪ "
+                    f"و بقیه {_percent(positive_others)}٪ امتیاز داده‌اند. "
+                    "یعنی این ویژگی بیشتر از چیزی که خودت حس می‌کنی در رفتارت دیده می‌شود. "
+                    "این اختلاف می‌تواند نشانه یک توانایی باشد که هنوز به اندازه کافی روی آن حساب نکرده‌ای."
+                ),
+                "",
+            ]
+        )
+
+    negative_delta, negative_key, negative_own, negative_others = negative_gap
+    if negative_delta < 0:
+        lines.extend(
+            [
+                "⚖️ جایی که برداشت تو و بقیه فرق دارد",
+                (
+                    f"در «{TRAIT_BY_KEY[negative_key].title}»، امتیاز خودت "
+                    f"{_percent(negative_own)}٪ و امتیاز بقیه {_percent(negative_others)}٪ است. "
+                    "این الزاماً خوب یا بد نیست؛ فقط نشان می‌دهد چیزی که درون خودت حس می‌کنی "
+                    "همیشه به همان شکل به بقیه منتقل نمی‌شود."
+                ),
+                "",
+            ]
+        )
+
+    _, closest_key, closest_own, closest_others = closest
+    closest_diff = abs(
+        _percent(closest_others) - _percent(closest_own)
+    )
+    lines.extend(
+        [
+            "🤝 کمترین اختلاف نظر",
+            (
+                f"در بین هشت ویژگی، کمترین فاصله مربوط به "
+                f"«{TRAIT_BY_KEY[closest_key].title}» است: {closest_diff}٪. "
+                "یعنی در این بخش، برداشت تو و بقیه از همه بخش‌های دیگر به هم نزدیک‌تر است."
+            ),
+            "",
+            "📊 بررسی هر ۸ ویژگی",
+        ]
+    )
+
     for trait in TRAITS:
-        own = round(stats.self_scores.get(trait.key, 0) * 20)
-        others = round(stats.others_scores.get(trait.key, 0) * 20)
-        lines.append(f"• {trait.title}: تو {own}٪ | دیگران {others}٪")
+        own_percent = _percent(stats.self_scores.get(trait.key))
+        others_percent = _percent(stats.others_scores.get(trait.key))
+        diff = others_percent - own_percent
+        if diff >= 10:
+            note = "بقیه بیشتر دیده‌اند"
+        elif diff <= -10:
+            note = "خودت بیشتر حس کرده‌ای"
+        else:
+            note = "نظرها نزدیک است"
+
+        lines.append(
+            f"• {trait.title}: تو {own_percent}٪ | بقیه {others_percent}٪ — {note}"
+        )
+
+    recommendation_keys: list[str] = []
+    for candidate in (
+        positive_key,
+        negative_key,
+        top_three[0][0],
+        closest_key,
+        *(trait.key for trait in TRAITS),
+    ):
+        if candidate not in recommendation_keys:
+            recommendation_keys.append(candidate)
+        if len(recommendation_keys) == 4:
+            break
+
+    lines.extend(["", "💡 پیشنهادهای مخصوص نتیجه تو"])
+    for index, key in enumerate(recommendation_keys[:4], start=1):
+        lines.append(
+            f"{index}️⃣ "
+            + _recommendation_for_trait(
+                key,
+                _percent(stats.self_scores.get(key)),
+                _percent(stats.others_scores.get(key)),
+            )
+        )
+
     lines.extend(
         [
             "",
-            "این نتیجه تشخیص روان‌شناختی نیست؛ یک تصویر جمعی از تجربه آدم‌های اطراف توست.",
+            "🧭 چطور از این گزارش استفاده کنی؟",
+            "• فقط روی یک اختلاف مهم تمرکز کن، نه همه درصدها.",
+            "• از یک دوست قابل‌اعتماد بخواه برای نتیجه‌ای که غافلگیرت کرده یک مثال واقعی بزند.",
+            "• بعد از چند هفته دوباره به همان موقعیت‌ها دقت کن و ببین برداشتت تغییر کرده یا نه.",
+            "• هرچه تعداد پاسخ‌ها بیشتر و متنوع‌تر باشد، جمع‌بندی قابل اتکاتر می‌شود.",
+            "",
+            (
+                "این گزارش تشخیص روان‌شناسی یا حکم قطعی درباره شخصیت تو نیست؛ "
+                "یک جمع‌بندی از پاسخ آدم‌هایی است که تو را می‌شناسند."
+            ),
         ]
     )
+
     return "\n".join(lines)
 
 
@@ -316,29 +533,53 @@ async def generate_report(
     owner_name: str,
     stats: MirrorStats,
 ) -> str:
+    fallback = fallback_report(owner_name, stats)
     if not settings.openai_api_key:
-        return fallback_report(owner_name, stats)
+        return fallback
 
     payload = {
-        "owner_name": owner_name,
+        "owner_name": _safe_plain_text(owner_name),
         "respondent_count": stats.respondent_count,
         "traits": [
             {
+                "key": trait.key,
                 "name": trait.title,
-                "self_percent": round(stats.self_scores.get(trait.key, 0) * 20),
-                "others_percent": round(stats.others_scores.get(trait.key, 0) * 20),
+                "self_percent": _percent(stats.self_scores.get(trait.key)),
+                "others_percent": _percent(stats.others_scores.get(trait.key)),
             }
             for trait in TRAITS
         ],
     }
-    prompt = f"""تو نویسنده گزارش محصول فارسی «آینه» هستی. از داده‌های زیر یک گزارش کوتاه، دقیق، گرم و بدون قضاوت بنویس.
-- گزارش باید فارسی باشد و حداکثر 500 کلمه.
-- از ادعاهای تشخیصی، پزشکی و قطعی خودداری کن.
-- با HTML ساده تلگرام بنویس و فقط از تگ‌های <b> و <i> استفاده کن.
-- بخش‌ها: تصویر کلی، سه ویژگی پررنگ، بزرگ‌ترین تفاوت نگاه خود و دیگران، یک پیشنهاد عملی، یادآوری اینکه نتیجه تشخیص روان‌شناختی نیست.
-- درصدها را دقیق نگه دار؛ چیزی اختراع نکن.
+
+    prompt = f"""تو نویسنده گزارش فارسی محصول «آینه» هستی.
+بر اساس داده‌های زیر یک گزارش مفصل، گرم، دقیق و کاربردی بنویس.
+
+قواعد قطعی:
+- فارسی روزمره و طبیعی بنویس؛ جمله‌ها باید شبیه حرف‌زدن یک آدم فارسی‌زبان باشند.
+- از عبارت‌های ترجمه‌ای، رسمی یا نامأنوس استفاده نکن.
+- این عبارت‌ها ممنوع‌اند: «سخت‌خوان»، «اثر حضور»، «تجربه می‌کنند»،
+  «پروفایل شخصیتی»، «تیپ شخصیتی»، «نقطه کور احتمالی».
+- کاربر را با «تو» خطاب کن.
+- هیچ تشخیص پزشکی، روان‌شناختی یا ادعای قطعی نده.
+- درصدها را دقیق نگه دار و هیچ داده‌ای اختراع نکن.
+- متن ساده باشد؛ HTML، Markdown و جدول استفاده نکن.
+- طول گزارش بین ۲۸۰۰ تا ۳۸۰۰ نویسه باشد.
+
+بخش‌ها دقیقاً:
+1) عنوان و تعداد پاسخ‌ها
+2) جمع‌بندی اصلی در یک پاراگراف
+3) سه ویژگی اصلی؛ برای هرکدام معنی روزمره و کاربردش
+4) غافلگیری مثبت: جایی که بقیه امتیاز بیشتری داده‌اند
+5) مهم‌ترین اختلاف: جایی که خود کاربر امتیاز بیشتری داده
+6) بخشی که نظر کاربر و بقیه نزدیک است
+7) مقایسه هر ۸ ویژگی با درصد دقیق
+8) چهار پیشنهاد عملی و متفاوت که مستقیماً از داده‌ها آمده باشند
+9) راهنمای استفاده درست از نتیجه و محدودیت گزارش
+
 داده‌ها:
-{json.dumps(payload, ensure_ascii=False)}"""
+{json.dumps(payload, ensure_ascii=False)}
+"""
+
     try:
         client = AsyncOpenAI(api_key=settings.openai_api_key)
         response = await client.responses.create(
@@ -346,41 +587,54 @@ async def generate_report(
             input=prompt,
             store=False,
         )
-        text = (response.output_text or "").strip()
-        return text or fallback_report(owner_name, stats)
+        text = _safe_plain_text(response.output_text or "")
+        if 1800 <= len(text) <= 4000:
+            return text
+        return fallback
     except Exception:
-        return fallback_report(owner_name, stats)
+        return fallback
 
 
 async def admin_stats() -> dict[str, int]:
     async with SessionLocal() as session:
-        users = await session.scalar(select(func.count(User.id))) or 0
+        users = await session.scalar(
+            select(func.count(User.id))
+        ) or 0
         mirrors = (
             await session.scalar(
-                select(func.count(Mirror.id)).where(Mirror.self_completed.is_(True))
+                select(func.count(Mirror.id)).where(
+                    Mirror.self_completed.is_(True)
+                )
             )
             or 0
         )
         responses = (
             await session.scalar(
-                select(func.count(distinct(Answer.respondent_telegram_id))).where(
-                    Answer.is_self.is_(False)
-                )
+                select(
+                    func.count(
+                        distinct(Answer.respondent_telegram_id)
+                    )
+                ).where(Answer.is_self.is_(False))
             )
             or 0
         )
         pending = (
             await session.scalar(
-                select(func.count(Payment.id)).where(Payment.status == "pending")
+                select(func.count(Payment.id)).where(
+                    Payment.status == "pending"
+                )
             )
             or 0
         )
         paid = (
             await session.scalar(
-                select(func.count(Mirror.id)).where(Mirror.paid.is_(True))
+                select(func.count(Mirror.id)).where(
+                    Mirror.paid.is_(True)
+                )
             )
             or 0
         )
+
     return {
         "users": users,
         "mirrors": mirrors,
