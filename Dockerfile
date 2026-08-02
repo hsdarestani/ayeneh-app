@@ -4,7 +4,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends fonts-noto-core curl \
+    && apt-get install -y --no-install-recommends \
+        fonts-noto-core \
+        fonts-dejavu-core \
+        curl \
+    && fc-cache -f -v >/dev/null \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
