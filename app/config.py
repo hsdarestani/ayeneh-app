@@ -13,10 +13,15 @@ class Settings(BaseSettings):
     admin_telegram_ids: list[int] = Field(default_factory=list)
     openai_api_key: str = ""
     openai_model: str = "gpt-5-mini"
+
+    # Deprecated manual-payment settings are kept empty so old Telegram
+    # callback buttons fail gracefully instead of crashing after deployment.
     card_number: str = ""
     card_holder: str = ""
+
+    zibal_merchant: str = ""
     price_toman: int = 99_000
-    domain: str = "ayeneh.smarbiz.sbs"
+    domain: str = "ayeneh.hamooncloud.ir"
     database_url: str = "sqlite+aiosqlite:////app/data/ayeneh.db"
     min_responses_for_preview: int = 3
 
@@ -32,6 +37,21 @@ class Settings(BaseSettings):
     @property
     def price_label(self) -> str:
         return f"{self.price_toman:,}".replace(",", "٬")
+
+    @property
+    def price_rial(self) -> int:
+        return self.price_toman * 10
+
+    @property
+    def public_base_url(self) -> str:
+        domain = self.domain.strip().rstrip("/")
+        if domain.startswith(("http://", "https://")):
+            return domain
+        return f"https://{domain}"
+
+    @property
+    def payment_callback_url(self) -> str:
+        return f"{self.public_base_url}/payment/callback"
 
     @property
     def card_display(self) -> str:
