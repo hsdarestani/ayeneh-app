@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     card_holder: str = ""
 
     zibal_merchant: str = ""
-    price_toman: int = 99_000
+    price_toman: int = 49_000
     domain: str = "ayeneh.hamooncloud.ir"
     database_url: str = "sqlite+aiosqlite:////app/data/ayeneh.db"
     min_responses_for_preview: int = 3
