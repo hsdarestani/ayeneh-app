@@ -22,13 +22,12 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOTTOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAIAPIKEY }}
           ADMIN_TELEGRAM_IDS: ${{ secrets.ADMIN_TELEGRAM_IDS }}
-          CARD_NUMBER: ${{ secrets.CARD_NUMBER }}
-          CARD_HOLDER: ${{ secrets.CARD_HOLDER }}
+          ZIBAL_MERCHANT: ${{ secrets.ZIBALMERCHANT }}
         with:
           host: ${{ secrets.HOST }}
           username: root
           password: ${{ secrets.PASS }}
-          envs: BOT_TOKEN,OPENAI_API_KEY,ADMIN_TELEGRAM_IDS,CARD_NUMBER,CARD_HOLDER
+          envs: BOT_TOKEN,OPENAI_API_KEY,ADMIN_TELEGRAM_IDS,ZIBAL_MERCHANT
           script_stop: true
           script: |
             set -euo pipefail
@@ -57,10 +56,9 @@ jobs:
             OPENAI_API_KEY=${OPENAI_API_KEY}
             OPENAI_MODEL=gpt-5-mini
             ADMIN_TELEGRAM_IDS=${ADMIN_TELEGRAM_IDS}
-            CARD_NUMBER=${CARD_NUMBER}
-            CARD_HOLDER=${CARD_HOLDER}
+            ZIBAL_MERCHANT=${ZIBAL_MERCHANT}
             PRICE_TOMAN=99000
-            DOMAIN=ayeneh.smarbiz.sbs
+            DOMAIN=ayeneh.hamooncloud.ir
             DATABASE_URL=sqlite+aiosqlite:////app/data/ayeneh.db
             MIN_RESPONSES_FOR_PREVIEW=3
             ENVEOF
