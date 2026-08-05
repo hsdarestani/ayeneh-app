@@ -53,6 +53,8 @@ class Answer(Base):
 
 
 class Payment(Base):
+    """Legacy manual receipt payment kept for historical records."""
+
     __tablename__ = "payments"
     id: Mapped[int] = mapped_column(primary_key=True)
     mirror_id: Mapped[int] = mapped_column(ForeignKey("mirrors.id"), index=True)
@@ -63,3 +65,21 @@ class Payment(Base):
     reviewed_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     mirror: Mapped[Mirror] = relationship(back_populates="payments")
+
+
+class GatewayPayment(Base):
+    """A Zibal transaction. Stored separately to avoid altering legacy SQLite rows."""
+
+    __tablename__ = "gateway_payments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mirror_id: Mapped[int] = mapped_column(ForeignKey("mirrors.id"), index=True)
+    payer_telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    amount_rial: Mapped[int] = mapped_column(Integer)
+    order_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    track_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, index=True, nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="created", index=True)
+    result_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ref_number: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    card_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

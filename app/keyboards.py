@@ -4,7 +4,11 @@ from urllib.parse import quote
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
+from app.config import get_settings
 from app.content import RELATIONS, SCORE_LABELS
+from app.payments import payment_signature
+
+settings = get_settings()
 
 
 MAIN_MENU = ReplyKeyboardMarkup(
@@ -69,8 +73,10 @@ def mirror_keyboard(mirror_id: int, paid: bool, can_preview: bool) -> InlineKeyb
     if paid:
         rows.append([InlineKeyboardButton(text="📖 دیدن گزارش کامل من", callback_data=f"report:{mirror_id}")])
     else:
+        signature = payment_signature(settings, mirror_id)
+        payment_url = f"{settings.public_base_url}/payment/start/{mirror_id}?sig={signature}"
         rows.append([InlineKeyboardButton(text="🎁 اول نمونه گزارش را ببین", callback_data=f"sample:{mirror_id}")])
-        rows.append([InlineKeyboardButton(text="🔓 باز کردن گزارش کامل من", callback_data=f"pay:{mirror_id}")])
+        rows.append([InlineKeyboardButton(text="💳 پرداخت و باز کردن گزارش کامل", url=payment_url)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -92,6 +98,7 @@ def share_keyboard(invite_link: str, owner_name: str) -> InlineKeyboardMarkup:
 
 
 def receipt_keyboard(payment_id: int) -> InlineKeyboardMarkup:
+    # Kept only for legacy receipt messages that may still exist in Telegram.
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
