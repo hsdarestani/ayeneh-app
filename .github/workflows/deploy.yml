@@ -57,7 +57,7 @@ jobs:
             OPENAI_MODEL=gpt-5-mini
             ADMIN_TELEGRAM_IDS=${ADMIN_TELEGRAM_IDS}
             ZIBAL_MERCHANT=${ZIBAL_MERCHANT}
-            PRICE_TOMAN=99000
+            PRICE_TOMAN=49000
             DOMAIN=ayeneh.hamooncloud.ir
             DATABASE_URL=sqlite+aiosqlite:////app/data/ayeneh.db
             MIN_RESPONSES_FOR_PREVIEW=3
