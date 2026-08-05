@@ -18,11 +18,11 @@ def test_payment_signature_rejects_tampering():
 def test_amount_and_urls_are_normalized():
     settings = Settings(
         bot_token="token",
-        price_toman=99_000,
+        price_toman=49_000,
         domain="ayeneh.hamooncloud.ir/",
     )
 
-    assert settings.price_rial == 990_000
+    assert settings.price_rial == 490_000
     assert settings.public_base_url == "https://ayeneh.hamooncloud.ir"
     assert settings.payment_callback_url == "https://ayeneh.hamooncloud.ir/payment/callback"
-    assert zibal_payment_url(1234) == "https://gateway.zibal.ir/start/1234"
+    assert zibal_payment_url(1234) == "https://gateway.zibal.io/start/1234"
