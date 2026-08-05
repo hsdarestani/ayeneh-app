@@ -9,9 +9,18 @@ from aiohttp import ClientError, ClientSession, ClientTimeout
 
 from app.config import Settings
 
-ZIBAL_REQUEST_URL = "https://gateway.zibal.ir/v1/request"
-ZIBAL_VERIFY_URL = "https://gateway.zibal.ir/v1/verify"
-ZIBAL_START_URL = "https://gateway.zibal.ir/start"
+# Production is hosted outside Iran. Zibal explicitly provides .io endpoints
+# for foreign servers. Keep the Iranian endpoints as a network fallback so a
+# temporary routing or DNS issue on either side does not stop checkout.
+ZIBAL_REQUEST_URLS = (
+    "https://gateway.zibal.io/v1/request",
+    "https://gateway.zibal.ir/v1/request",
+)
+ZIBAL_VERIFY_URLS = (
+    "https://gateway.zibal.io/v1/verify",
+    "https://gateway.zibal.ir/v1/verify",
+)
+ZIBAL_START_URL = "https://gateway.zibal.io/start"
 
 
 @dataclass(frozen=True)
@@ -49,25 +58,34 @@ def valid_payment_signature(settings: Settings, mirror_id: int, signature: str) 
     return bool(expected and signature and hmac.compare_digest(expected, signature))
 
 
-async def _post_json(url: str, payload: dict[str, Any]) -> ZibalResponse:
+async def _post_json(urls: tuple[str, ...], payload: dict[str, Any]) -> ZibalResponse:
     timeout = ClientTimeout(total=20, connect=8)
-    try:
-        async with ClientSession(timeout=timeout) as session:
-            async with session.post(url, json=payload) as response:
-                response.raise_for_status()
-                data = await response.json(content_type=None)
-    except (ClientError, TimeoutError, ValueError) as exc:
-        raise ZibalError("ارتباط با درگاه پرداخت برقرار نشد.") from exc
+    failures: list[str] = []
 
-    if not isinstance(data, dict):
-        raise ZibalError("پاسخ نامعتبر از درگاه پرداخت دریافت شد.")
+    async with ClientSession(timeout=timeout) as session:
+        for url in urls:
+            try:
+                async with session.post(url, json=payload) as response:
+                    response.raise_for_status()
+                    data = await response.json(content_type=None)
+            except (ClientError, TimeoutError, ValueError) as exc:
+                failures.append(f"{url}: {type(exc).__name__}")
+                continue
 
-    try:
-        result = int(data.get("result"))
-    except (TypeError, ValueError) as exc:
-        raise ZibalError("کد نتیجه نامعتبر از درگاه پرداخت دریافت شد.") from exc
+            if not isinstance(data, dict):
+                failures.append(f"{url}: invalid response body")
+                continue
 
-    return ZibalResponse(result=result, payload=data)
+            try:
+                result = int(data.get("result"))
+            except (TypeError, ValueError):
+                failures.append(f"{url}: invalid result code")
+                continue
+
+            return ZibalResponse(result=result, payload=data)
+
+    details = "; ".join(failures) if failures else "no endpoint responded"
+    raise ZibalError(f"ارتباط با درگاه پرداخت برقرار نشد. ({details})")
 
 
 async def request_zibal_payment(
@@ -78,7 +96,7 @@ async def request_zibal_payment(
     description: str,
 ) -> int:
     response = await _post_json(
-        ZIBAL_REQUEST_URL,
+        ZIBAL_REQUEST_URLS,
         {
             "merchant": settings.zibal_merchant,
             "amount": amount_rial,
@@ -99,7 +117,7 @@ async def request_zibal_payment(
 
 async def verify_zibal_payment(settings: Settings, track_id: int) -> ZibalResponse:
     return await _post_json(
-        ZIBAL_VERIFY_URL,
+        ZIBAL_VERIFY_URLS,
         {
             "merchant": settings.zibal_merchant,
             "trackId": track_id,
